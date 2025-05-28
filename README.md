@@ -40,10 +40,7 @@ Face Similarity GUI allows you to find faces in your image collection that are s
 ```conda activate face_similarity```
 
 ### Install Dependencies
-```pip install pyside6 deepface retinaface faiss-cpu torch pillow numpy pandas```
-
-#### For GPU support:
-```pip install faiss-gpu torch torchvision torchaudio``` - please visit the PyTorch website for more information
+```pip install pyside6 deepface retinaface faiss-cpu pillow numpy pandas tensoflow<2.11``` # TensorFlow 2.10 is the highest version supported natively on Windows, which also means numpy<2.0 is required
 
 ### Usage
 - Run the application:
@@ -67,7 +64,7 @@ I
 ```pip install nuitka```
 
 - Compile the application:
-```python -m nuitka --standalone --follow-imports --enable-plugin=pyside6,numpy,torch --include-package-data=deepface,retinaface --include-package=faiss --include-package=torch --include-package=PIL --include-package=pandas --include-module=torch.backends.cudnn --include-package=numpy --include-data-files=$HOME/.deepface/weights/*.h5=.deepface/weights/ face_similarity_gui.py```
+```python -m nuitka --standalone --follow-imports --enable-plugin=pyside6,numpy,torch --include-package-data=deepface,retinaface  --include-package=PIL,cv2 --include-package=pandas --include-package=numpy --include-data-files=$HOME/.deepface/weights/*.h5=.deepface/weights/ face_similarity_gui.py```
 
 - The compiled binary will be in the face_similarity_gui.dist directory
 
@@ -76,10 +73,10 @@ I
 ```pip install nuitka```
 
 - Compile the application (run in Command Prompt or PowerShell):
-```python -m nuitka --standalone --follow-imports --enable-plugin=pyside6,numpy,torch --include-package-data=deepface,retinaface --include-package=faiss --include-package=torch --include-package=PIL --include-package=pandas --include-module=torch.backends.cudnn --include-package=numpy --include-data-files=%USERPROFILE%\.deepface\weights\*.h5=.deepface\weights\ face_similarity_gui.py```
+```python -m nuitka --standalone --follow-imports --enable-plugin=pyside6 --include-package-data=deepface,retinaface --include-package=PIL --include-package=pandas --include-package=numpy --include-package=tensorflow --include-package=cv2 --include-package=tqdm --include-package=requests --include-data-files={USER_HOME}\*.h5=.deepface/weights/ --include-data-files={conda_path}\envs\deepface\Library\bin\cudart64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cublas64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cublasLt64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\curand64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cusolver64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cusparse64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cudnn64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\cufft64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\nvrtc64_*.dll=cuda_libs/ --include-data-files={conda_path}\envs\deepface\Library\bin\nvrtc-builtins64_*.dll=cuda_libs/ face_similarity_gui.py``` # Replace {conda_path} with the path to your Conda environment and {USER_HOME} with your home directory
 
 - For a single executable file, add the --onefile option:
-```python -m nuitka --standalone --onefile --follow-imports --enable-plugin=pyside6,numpy,torch --include-package-data=deepface,retinaface --include-package=faiss --include-package=torch --include-package=PIL --include-package=pandas --include-module=torch.backends.cudnn --include-package=numpy --include-data-files=%USERPROFILE%\.deepface\weights\*.h5=.deepface\weights\ face_similarity_gui.py```
+```python -m nuitka --standalone --onefile --follow-imports --enable-plugin=pyside6,numpy,torch --include-package-data=deepface,retinaface --include-package=faiss  --include-package=PIL --include-package=pandas --include-package=numpy --include-data-files={USER_HOME}\.deepface\weights\*.h5=.deepface\weights\ face_similarity_gui.py```
 
 - The compiled binary will be in the face_similarity_gui.dist directory
 

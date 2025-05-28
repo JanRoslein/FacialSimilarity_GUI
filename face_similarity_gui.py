@@ -1,464 +1,1005 @@
-import sys
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                              QSlider, QComboBox, QProgressBar, QTextEdit,
-                              QFileDialog, QSpinBox, QFormLayout)
-from PySide6.QtCore import Qt, QThreadPool, QRunnable, QObject, Signal
-from PySide6.QtGui import QDoubleValidator
+import sys
+import shutil
+import pickle
+import pandas as pd
+import numpy as np
+from PIL import Image, ImageFile
+import tensorflow as tf
 from deepface import DeepFace
 from retinaface import RetinaFace
-import faiss
-import torch
-from PIL import Image, ImageFile
-import glob
-import numpy as np
-import shutil
-import pandas as pd
-import pickle
+from tqdm import tqdm
+import warnings
 
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QGridLayout, QLabel, QLineEdit, 
+                             QPushButton, QFileDialog, QMessageBox, QProgressBar,
+                             QComboBox, QSpinBox, QCheckBox, QGroupBox, QFrame,
+                             QScrollArea, QTextEdit, QSplitter, QTabWidget)
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QPixmap, QFont, QPalette, QColor, QIcon
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-class WorkerSignals(QObject):
-    progress = Signal(int)
-    message = Signal(str)
-    finished = Signal(pd.DataFrame)
+class ModernButton(QPushButton):
+    def __init__(self, text, primary=False):
+        super().__init__(text)
+        self.primary = primary
+        self.setup_style()
+        
+    def setup_style(self):
+        if self.primary:
+            self.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #667eea, stop:1 #764ba2);
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 12px 24px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #5a6fd8, stop:1 #6a4190);
+                }
+                QPushButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #4c5bc4, stop:1 #5d3a7e);
+                }
+                QPushButton:disabled {
+                    background: #cccccc;
+                    color: #666666;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QPushButton {
+                    background: #f8f9fa;
+                    color: #495057;
+                    border: 2px solid #e9ecef;
+                    border-radius: 8px;
+                    padding: 10px 20px;
+                    font-weight: 500;
+                    font-size: 13px;
+                }
+                QPushButton:hover {
+                    background: #e9ecef;
+                    border-color: #adb5bd;
+                }
+                QPushButton:pressed {
+                    background: #dee2e6;
+                }
+            """)
 
-class FaceProcessor(QRunnable):
-    def __init__(self, input_path, image_dir, output_dir, threshold, device, batch_size):
+class ModernLineEdit(QLineEdit):
+    def __init__(self, placeholder=""):
         super().__init__()
-        self.input_path = input_path
-        self.image_dir = image_dir
-        self.output_dir = output_dir
-        self.threshold = threshold
-        self.device = device
-        self.batch_size = self.calculate_batch_size(batch_size)
-        self.signals = WorkerSignals()
-        self.backends = {
-            "face_detector": "retinaface", 
-            "face_recognizer": "ArcFace"
-        }
+        self.setPlaceholderText(placeholder)
+        self.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                padding: 12px 16px;
+                font-size: 14px;
+                background: white;
+                color: #343a40;
+            }
+            QLineEdit:focus {
+                border-color: #667eea;
+                outline: none;
+            }
+        """)
 
-    def calculate_batch_size(self, user_set_size):
-        if self.device == "cuda" and torch.cuda.is_available():
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            used_mem = torch.cuda.memory_allocated(0)
-            free_mem = total_mem - used_mem
-            # Estimate 500MB per batch item (adjust based on actual model memory usage)
-            safe_batch = int(free_mem // (500 * 1024**2))
-            return min(user_set_size, safe_batch) if user_set_size > 0 else safe_batch
-        return user_set_size if user_set_size > 0 else 4
+class ModernComboBox(QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                padding: 12px 16px;
+                font-size: 14px;
+                background: white;
+                color: #343a40;
+                min-width: 150px;
+            }
+            QComboBox:focus {
+                border-color: #667eea;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox::down-arrow {
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOCIgdmlld0JveD0iMCAwIDEyIDgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDFMNiA2TDExIDEiIHN0cm9rZT0iIzY2N2VlYSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPC9zdmc+);
+            }
+        """)
+
+class ModernGroupBox(QGroupBox):
+    def __init__(self, title):
+        super().__init__(title)
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 16px;
+                color: #343a40;
+                border: 2px solid #e9ecef;
+                border-radius: 12px;
+                margin-top: 12px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 8px 0 8px;
+                background: white;
+            }
+        """)
+
+class ProcessingThread(QThread):
+    progress_updated = Signal(int)
+    status_updated = Signal(str)
+    finished_processing = Signal(list, pd.DataFrame)
+    error_occurred = Signal(str)
+
+    def __init__(self, params):
+        super().__init__()
+        self.params = params
+    
+    def create_pillow_database_representations(self, db_path):
+        """Create database representations using Pillow to handle Unicode filenames"""
+        representations = []
+        image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
+        
+        try:
+            for root, dirs, files in os.walk(db_path):
+                for file in files:
+                    if file.lower().endswith(image_extensions):
+                        file_path = os.path.join(root, file)
+                        try:
+                            # Load image using Pillow
+                            pil_image = Image.open(file_path)
+                            if pil_image.mode != 'RGB':
+                                pil_image = pil_image.convert('RGB')
+                            
+                            representations.append({
+                                'path': file_path,
+                                'image': np.array(pil_image)
+                            })
+                        except Exception as e:
+                            print(f"Failed to load {file_path}: {e}")
+                            continue
+            
+            return representations
+        except Exception as e:
+            self.error_occurred.emit(f"Error creating database representations: {e}")
+            return []
+
+    def process_with_individual_verification(self, target_image, db_path, threshold, output_folder):
+        """Alternative processing method using individual verification"""
+        try:
+            results = []
+            image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
+            
+            # Get all image files in database
+            db_images = []
+            for root, dirs, files in os.walk(db_path):
+                for file in files:
+                    if file.lower().endswith(image_extensions):
+                        db_images.append(os.path.join(root, file))
+            
+            if not db_images:
+                return [], pd.DataFrame()
+            
+            # Process each image individually
+            verification_results = []
+            for db_image_path in db_images:
+                try:
+                    # Load database image using Pillow
+                    db_pil_image = Image.open(db_image_path)
+                    if db_pil_image.mode != 'RGB':
+                        db_pil_image = db_pil_image.convert('RGB')
+                    db_image_array = np.array(db_pil_image)
+                    
+                    # Verify similarity
+                    result = DeepFace.verify(
+                        img1_path=target_image,
+                        img2_path=db_image_array,
+                        model_name="ArcFace",
+                        distance_metric="cosine",
+                        detector_backend="retinaface",
+                        enforce_detection=False,
+                        align=True
+                    )
+                    
+                    similarity_score = 1 - result['distance']
+                    if similarity_score >= threshold:
+                        original_filename = os.path.basename(db_image_path)
+                        output_path = os.path.join(output_folder, original_filename)
+                        
+                        # Copy file using Pillow to handle Unicode
+                        if not os.path.exists(output_path):
+                            db_pil_image.save(output_path)
+                        
+                        results.append({
+                            'image_path': db_image_path,
+                            'score': similarity_score
+                        })
+                        
+                        verification_results.append({
+                            'identity': db_image_path,
+                            'distance': result['distance'],
+                            'threshold': result['threshold']
+                        })
+                        
+                except Exception as e:
+                    print(f"Failed to process {db_image_path}: {e}")
+                    continue
+            
+            # Create DataFrame from verification results
+            if verification_results:
+                df = pd.DataFrame(verification_results)
+            else:
+                df = pd.DataFrame()
+            
+            # Save CSV results
+            if results:
+                csv_path = os.path.join(output_folder, 'similarity_results.csv')
+                results_df = pd.DataFrame(results)
+                results_df.to_csv(csv_path, index=False, encoding='utf-8')
+            
+            return results, df
+            
+        except Exception as e:
+            self.error_occurred.emit(f"Error in individual verification: {str(e)}")
+            return [], pd.DataFrame()
+
+    def load_image_with_pillow(self, image_path):
+        """Load image using Pillow with proper error handling for Unicode paths"""
+        try:
+            pil_image = Image.open(image_path)
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            return np.array(pil_image)
+        except Exception as e:
+            print(f"Failed to load image {image_path}: {e}")
+            return None
+
 
     def run(self):
         try:
-            # Use DeepFace's built-in functions for model handling
-            self.signals.message.emit(f"Initializing with {self.backends['face_detector']} detector and {self.backends['face_recognizer']} recognition model...")
+            self.status_updated.emit("Initializing GPU detection...")
             
-            # Set device if CUDA is selected
-            if self.device == "cuda" and torch.cuda.is_available():
-                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                self.signals.message.emit("Using CUDA for processing")
-            else:
-                os.environ["CUDA_VISIBLE_DEVICES"] = ""
-                self.signals.message.emit("Using CPU for processing")
-
-            # Collect all images in the directory
-            extensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp']
-            image_files = []
-            for ext in extensions:
-                image_files.extend(glob.glob(os.path.join(self.image_dir, '**/*.' + ext), recursive=True))
-
-            if not image_files:
-                self.signals.message.emit("No images found in the directory.")
-                return
-
-            # Create output directory if needed
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-
-            # Build FAISS index
-            index = faiss.IndexFlatL2(512)
-            image_paths = []
-            total = len(image_files)
-            
-            self.signals.message.emit(f"Processing {total} images...")
-            
-            for i in range(0, total, self.batch_size):
-                batch = image_files[i:i + self.batch_size]
-                embeddings = []
-                batch_paths = []
-                for img_path in batch:
-                    try:
-                        # FIX: Use RetinaFace directly as a module function
-                        faces = RetinaFace.extract_faces(img_path=img_path, align=True)
-                        if not faces or len(faces) == 0:
-                            self.signals.message.emit(f"No faces found in {img_path}.")
-                            continue
-                        # Convert to tensor and move to device
-                        face = Image.fromarray(faces[0]).convert('RGB')
-                        face = face.resize((112, 112))
-                        face = np.array(face)
-                        
-                        # Get embedding using DeepFace
-                        embedding = DeepFace.represent(face, model_name="ArcFace", enforce_detection=False)
-                        
-                        if isinstance(embedding, list):
-                            embedding = np.array(embedding[0]["embedding"])
-                        
-                        embeddings.append(embedding)
-                        batch_paths.append(img_path)
-                    except Exception as e:
-                        self.signals.message.emit(f"Error processing {img_path}: {str(e)}")
-                
-                if embeddings:
-                    embeddings_array = np.array(embeddings).astype('float32')
-                    index.add(embeddings_array)
-                    image_paths.extend(batch_paths)
-                
-                self.signals.progress.emit(int((i + len(batch)) / total * 100))
-
-            # Process input image
-            try:
-                # FIX: Use proper RetinaFace method for detection
-                input_faces = RetinaFace.extract_faces(self.input_path, align=True)
-                if not input_faces or len(input_faces) == 0:
-                    self.signals.message.emit("No faces found in input image.")
-                    return
-            except Exception as e:
-                self.signals.message.emit(f"Error extracting faces from input image: {str(e)}")
-                return
-
-            # Prepare results
-            results = []
-            for face_idx, face in enumerate(input_faces):
+            # GPU Detection
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus and self.params['use_gpu']:
                 try:
-                    face_img = Image.fromarray(face).convert('RGB')
-                    face_img = face_img.resize((112, 112))
-                    face_array = np.array(face_img)
-                    
-                    # Get embedding using DeepFace
-                    query = DeepFace.represent(face_array, model_name="ArcFace", enforce_detection=False)
-                    
-                    if isinstance(query, list):
-                        query = np.array(query[0]["embedding"])
-                    
-                    query = np.array([query]).astype('float32')
-                    
-                    if len(image_paths) > 0:
-                        distances, indices = index.search(query, k=min(5, len(image_paths)))
-                        
-                        for i in range(len(indices[0])):
-                            idx = indices[0][i]
-                            distance = distances[0][i]
-                            similarity_score = 1 - distance
-                            
-                            if similarity_score > self.threshold:
-                                src = image_paths[idx]
-                                base_name = os.path.basename(src)
-                                dst = os.path.join(self.output_dir, f"face{face_idx+1}_match{i+1}_{base_name}")
-                                shutil.copy2(src, dst)
-                                results.append({'path': src, 'score': similarity_score})
-                except Exception as e:
-                    self.signals.message.emit(f"Error processing input face {face_idx+1}: {str(e)}")
-
-            # Convert to DataFrame and emit
-            df = pd.DataFrame(results)
-            if len(df) > 0:
-                self.signals.finished.emit(df)
+                    tf.config.experimental.set_memory_growth(gpus[0], True)
+                    self.status_updated.emit(f"Using GPU: {gpus[0].name}")
+                except RuntimeError as e:
+                    self.status_updated.emit(f"GPU setup failed, using CPU: {e}")
             else:
-                self.signals.message.emit("No similar faces found above the threshold.")
-                empty_df = pd.DataFrame(columns=['path', 'score'])
-                self.signals.finished.emit(empty_df)
+                tf.config.set_visible_devices([], 'GPU')
+                self.status_updated.emit("Using CPU for processing")
+
+            self.status_updated.emit("Loading and aligning faces...")
+            aligned_faces = self.align_faces(self.params['image_path'])
+            
+            if not aligned_faces:
+                self.error_occurred.emit("Failed to process input image or no faces detected")
+                return
+
+            results = []
+            total_faces = len(aligned_faces)
+            
+            for i, aligned_image in enumerate(aligned_faces):
+                self.status_updated.emit(f"Processing face {i+1}/{total_faces}")
+                
+                result_set, dfs = self.process_image_traditional(
+                    aligned_image, 
+                    self.params['db_path'], 
+                    self.params['threshold'], 
+                    self.params['output_folder']
+                )
+                
+                results.append((result_set, dfs))
+                progress = int(((i + 1) / total_faces) * 100)
+                self.progress_updated.emit(progress)
+
+            # Combine results
+            all_results = [result for result_set, _ in results for result in result_set]
+            valid_dfs = [dfs for _, dfs in results if not dfs.empty]
+            
+            if valid_dfs:
+                combined_dfs = pd.concat(valid_dfs, ignore_index=True)
+            else:
+                combined_dfs = pd.DataFrame()
+            
+            self.finished_processing.emit(all_results, combined_dfs)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"Processing error: {str(e)}")
+
+    def align_faces(self, image_path):
+        try:
+            # Use Pillow settings for large images
+            if self.params['allow_large_images']:
+                Image.MAX_IMAGE_PIXELS = None
+            
+            # Load image using Pillow to handle Unicode paths
+            pil_image = Image.open(image_path)
+            
+            # Convert to RGB if necessary
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Convert PIL image to numpy array for RetinaFace
+            image_array = np.array(pil_image)
+            
+            # Use RetinaFace with numpy array instead of file path
+            faces = RetinaFace.extract_faces(img_path=image_array, align=True)
+            
+            # Convert faces to PIL Images
+            aligned_faces = []
+            for face in faces:
+                # RetinaFace returns values in [0,1] range
+                if face.max() <= 1.0:
+                    face_uint8 = (face * 255).astype(np.uint8)
+                else:
+                    face_uint8 = face.astype(np.uint8)
+                aligned_faces.append(Image.fromarray(face_uint8))
+            
+            return aligned_faces
+        except Exception as e:
+            self.error_occurred.emit(f"Error processing image {image_path}: {e}")
+            return []
+
+    def process_image_traditional(self, aligned_image, db_path, threshold, output_folder):
+        try:
+            # Convert PIL image to numpy array
+            aligned_image_np = np.array(aligned_image)
+            
+            # Ensure the image is in RGB format and correct data type
+            if len(aligned_image_np.shape) == 3 and aligned_image_np.shape[2] == 3:
+                # Image is already RGB
+                pass
+            elif len(aligned_image_np.shape) == 2:
+                # Convert grayscale to RGB
+                aligned_image_np = np.stack([aligned_image_np] * 3, axis=-1)
+            
+            # Ensure correct data type (uint8, 0-255 range)
+            if aligned_image_np.dtype != np.uint8:
+                if aligned_image_np.max() <= 1.0:
+                    aligned_image_np = (aligned_image_np * 255).astype(np.uint8)
+                else:
+                    aligned_image_np = aligned_image_np.astype(np.uint8)
+            
+            # Create a custom database representation using Pillow
+            db_representations = self.create_pillow_database_representations(db_path)
+            
+            if not db_representations:
+                self.error_occurred.emit("No valid images found in database or failed to process database images")
+                return [], pd.DataFrame()
+            
+            # Use DeepFace.find with numpy array input
+            try:
+                dfs = DeepFace.find(
+                    img_path=aligned_image_np,
+                    db_path=db_path,
+                    model_name="ArcFace",
+                    distance_metric="cosine",
+                    detector_backend="retinaface",
+                    enforce_detection=False,
+                    silent=True,
+                    align=True
+                )
+            except Exception as e:
+                # If DeepFace.find fails, try alternative approach
+                self.error_occurred.emit(f"DeepFace.find failed: {e}. Trying alternative approach...")
+                return self.process_with_individual_verification(aligned_image_np, db_path, threshold, output_folder)
+            
+            # Handle different return types from DeepFace.find
+            if isinstance(dfs, list):
+                if len(dfs) > 0:
+                    valid_dfs = [df for df in dfs if isinstance(df, pd.DataFrame) and not df.empty]
+                    if valid_dfs:
+                        combined_df = pd.concat(valid_dfs, ignore_index=True)
+                    else:
+                        return [], pd.DataFrame()
+                else:
+                    return [], pd.DataFrame()
+            elif isinstance(dfs, pd.DataFrame):
+                if dfs.empty:
+                    return [], pd.DataFrame()
+                combined_df = dfs
+            else:
+                return [], pd.DataFrame()
+            
+            # Process results
+            if not combined_df.empty:
+                results = []
+                for index, row in combined_df.iterrows():
+                    similarity_score = 1 - row['distance']
+                    if similarity_score >= threshold:
+                        original_filename = os.path.basename(row['identity'])
+                        output_path = os.path.join(output_folder, original_filename)
+                        
+                        # Copy file if it doesn't already exist
+                        if not os.path.exists(output_path):
+                            try:
+                                shutil.copy2(row['identity'], output_path)
+                            except Exception as copy_error:
+                                # If copy fails due to Unicode, use Pillow to save
+                                try:
+                                    img = Image.open(row['identity'])
+                                    img.save(output_path)
+                                except Exception as save_error:
+                                    self.error_occurred.emit(f"Failed to copy/save {original_filename}: {save_error}")
+                                    continue
+                        
+                        results.append({
+                            'image_path': row['identity'], 
+                            'score': similarity_score
+                        })
+                
+                # Save CSV results
+                if results:
+                    csv_path = os.path.join(output_folder, 'similarity_results.csv')
+                    results_df = pd.DataFrame(results)
+                    results_df.to_csv(csv_path, index=False, encoding='utf-8')
+                
+                return results, combined_df
+            else:
+                return [], pd.DataFrame()
                 
         except Exception as e:
-            self.signals.message.emit(f"Error: {str(e)}")
+            self.error_occurred.emit(f"Error in face processing: {str(e)}")
+            return [], pd.DataFrame()
 
-class MainWindow(QMainWindow):
+    def verify_face_similarity(self, target_image_path, candidate_image_path):
+        """Debug method to verify similarity between two specific images using Pillow"""
+        try:
+            # Load images using Pillow
+            target_image = self.load_image_with_pillow(target_image_path)
+            candidate_image = self.load_image_with_pillow(candidate_image_path)
+            
+            if target_image is None or candidate_image is None:
+                return None
+            
+            result = DeepFace.verify(
+                img1_path=target_image,
+                img2_path=candidate_image,
+                model_name="ArcFace",
+                distance_metric="cosine",
+                detector_backend="retinaface",
+                enforce_detection=False,
+                align=True
+            )
+            return result
+        except Exception as e:
+            print(f"Verification error: {e}")
+            return None
+
+    def preprocess_image_for_comparison(self, image_path_or_array):
+        """Ensure consistent preprocessing for all images"""
+        try:
+            if isinstance(image_path_or_array, str):
+                # Load image from path
+                img = Image.open(image_path_or_array)
+                img_array = np.array(img)
+            else:
+                img_array = image_path_or_array
+            
+            # Ensure RGB format
+            if len(img_array.shape) == 3 and img_array.shape[2] == 4:
+                # Convert RGBA to RGB
+                img_array = img_array[:, :, :3]
+            elif len(img_array.shape) == 2:
+                # Convert grayscale to RGB
+                img_array = np.stack([img_array] * 3, axis=-1)
+            
+            # Ensure correct data type and range
+            if img_array.dtype != np.uint8:
+                if img_array.max() <= 1.0:
+                    img_array = (img_array * 255).astype(np.uint8)
+                else:
+                    img_array = img_array.astype(np.uint8)
+            
+            return img_array
+        except Exception as e:
+            print(f"Preprocessing error: {e}")
+            return None
+
+class FaceRecognitionApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.init_ui()
-        self.threadpool = QThreadPool()
-        self.current_matrix = pd.DataFrame()
-
-    def init_ui(self):
-        self.setWindowTitle("Face Similarity Finder")
-        self.setGeometry(100, 100, 800, 600)
-
-        self.create_input_widgets()
-        self.create_controls()
-        self.create_progress()
-        self.create_log()
-
-        layout = QVBoxLayout()
-        layout.addLayout(self.input_layout)
-        layout.addLayout(self.control_layout)
-        layout.addLayout(self.progress_layout)
-        layout.addWidget(self.log_output)
-
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-
-    def create_input_widgets(self):
-        # Input image selection
-        input_image_layout = QHBoxLayout()
-        self.input_image_line = QLineEdit()
-        self.input_image_line.setPlaceholderText("Select input image")
-        input_image_button = QPushButton("Browse...")
-        input_image_button.clicked.connect(self.browse_input_image)
-        input_image_layout.addWidget(self.input_image_line)
-        input_image_layout.addWidget(input_image_button)
-
-        # Image directory selection
-        image_dir_layout = QHBoxLayout()
-        self.image_dir_line = QLineEdit()
-        self.image_dir_line.setPlaceholderText("Select image directory")
-        image_dir_button = QPushButton("Browse...")
-        image_dir_button.clicked.connect(self.browse_image_dir)
-        image_dir_layout.addWidget(self.image_dir_line)
-        image_dir_layout.addWidget(image_dir_button)
-
-        # Output directory selection
-        output_dir_layout = QHBoxLayout()
-        self.output_dir_line = QLineEdit()
-        self.output_dir_line.setPlaceholderText("Select output directory")
-        output_dir_button = QPushButton("Browse...")
-        output_dir_button.clicked.connect(self.browse_output_dir)
-        output_dir_layout.addWidget(self.output_dir_line)
-        output_dir_layout.addWidget(output_dir_button)
-
-        # Threshold controls
-        threshold_layout = QHBoxLayout()
-        threshold_label = QLabel("Threshold (0-1):")
-        self.threshold_line = QLineEdit("0.5")
-        self.threshold_line.setFixedWidth(50)
-        self.threshold_line.setAlignment(Qt.AlignRight)
-        # FIX: Use proper validator with locale
-        validator = QDoubleValidator(0.0, 1.0, 2)
-        validator.setNotation(QDoubleValidator.StandardNotation)
-        self.threshold_line.setValidator(validator)
+        self.results = []
+        self.setup_ui()
+        self.detect_gpu()
         
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setMinimum(0)
-        self.threshold_slider.setMaximum(100)
-        self.threshold_slider.setValue(50)
-        threshold_layout.addWidget(threshold_label)
-        threshold_layout.addWidget(self.threshold_line)
-        threshold_layout.addWidget(self.threshold_slider)
+    def setup_ui(self):
+        self.setWindowTitle("Advanced Face Recognition Studio")
+        self.setGeometry(100, 100, 1400, 900)
         
-        # FIX: Connect signals after UI is created
-        self.threshold_slider.valueChanged.connect(self.update_threshold_line)
-        self.threshold_line.editingFinished.connect(self.update_threshold_slider)
-
-        # Device selection
-        device_layout = QHBoxLayout()
-        device_label = QLabel("Device:")
-        self.device_combo = QComboBox()
-        if torch.cuda.is_available():
-            self.device_combo.addItems(["CPU", "CUDA"])
-        else:
-            self.device_combo.addItems(["CPU"])
-        self.device_combo.currentIndexChanged.connect(self.update_batch_size)
-        device_layout.addWidget(device_label)
-        device_layout.addWidget(self.device_combo)
-
+        # Set application style
+        self.setStyleSheet("""
+            QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #f8f9fa, stop:1 #e9ecef);
+            }
+            QLabel {
+                color: #343a40;
+                font-size: 14px;
+            }
+        """)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Create splitter for main layout
+        splitter = QSplitter(Qt.Horizontal)
+        central_widget.setLayout(QHBoxLayout())
+        central_widget.layout().addWidget(splitter)
+        
+        # Left panel - Controls
+        left_panel = QWidget()
+        left_panel.setMaximumWidth(500)
+        left_panel.setStyleSheet("""
+            QWidget {
+                background: white;
+                border-radius: 12px;
+            }
+        """)
+        
+        # Add shadow effect
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setOffset(0, 2)
+        left_panel.setGraphicsEffect(shadow)
+        
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setSpacing(20)
+        left_layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Title
+        title = QLabel("Face Recognition Studio")
+        title.setStyleSheet("""
+            QLabel {
+                font-size: 28px;
+                font-weight: bold;
+                color: #343a40;
+                margin-bottom: 10px;
+            }
+        """)
+        left_layout.addWidget(title)
+        
+        # Input section
+        input_group = ModernGroupBox("Input Configuration")
+        input_layout = QGridLayout(input_group)
+        
+        # Image path
+        input_layout.addWidget(QLabel("Target Image:"), 0, 0)
+        self.image_path_edit = ModernLineEdit("Select target image...")
+        input_layout.addWidget(self.image_path_edit, 0, 1)
+        self.browse_image_btn = ModernButton("Browse")
+        self.browse_image_btn.clicked.connect(self.browse_image)
+        input_layout.addWidget(self.browse_image_btn, 0, 2)
+        
+        # Database path
+        input_layout.addWidget(QLabel("Database Folder:"), 1, 0)
+        self.db_path_edit = ModernLineEdit("Select database folder...")
+        input_layout.addWidget(self.db_path_edit, 1, 1)
+        self.browse_db_btn = ModernButton("Browse")
+        self.browse_db_btn.clicked.connect(self.browse_database)
+        input_layout.addWidget(self.browse_db_btn, 1, 2)
+        
+        # Output path
+        input_layout.addWidget(QLabel("Output Folder:"), 2, 0)
+        self.output_path_edit = ModernLineEdit("Select output folder...")
+        input_layout.addWidget(self.output_path_edit, 2, 1)
+        self.browse_output_btn = ModernButton("Browse")
+        self.browse_output_btn.clicked.connect(self.browse_output)
+        input_layout.addWidget(self.browse_output_btn, 2, 2)
+        
+        left_layout.addWidget(input_group)
+        
+        # Processing options
+        options_group = ModernGroupBox("Processing Options")
+        options_layout = QGridLayout(options_group)
+        
+        # Similarity threshold
+        options_layout.addWidget(QLabel("Similarity Threshold:"), 0, 0)
+        self.threshold_edit = ModernLineEdit("0.45")
+        options_layout.addWidget(self.threshold_edit, 0, 1)
+        
+        # GPU/CPU selection
+        options_layout.addWidget(QLabel("Processing Unit:"), 1, 0)
+        self.gpu_combo = ModernComboBox()
+        self.gpu_combo.addItems(["Auto-detect", "Force CPU", "Force GPU"])
+        options_layout.addWidget(self.gpu_combo, 1, 1)
+        
         # Batch size
-        batch_size_layout = QHBoxLayout()
-        batch_size_label = QLabel("Batch Size:")
+        options_layout.addWidget(QLabel("Batch Size:"), 2, 0)
         self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 100)
-        self.batch_size_spin.setValue(16)
-        batch_size_layout.addWidget(batch_size_label)
-        batch_size_layout.addWidget(self.batch_size_spin)
-
-        # Create form layout
-        self.input_layout = QVBoxLayout()
+        self.batch_size_spin.setRange(1, 32)
+        self.batch_size_spin.setValue(4)
+        self.batch_size_spin.setStyleSheet("""
+            QSpinBox {
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                padding: 8px;
+                font-size: 14px;
+                background: white;
+                color: #343a40;
+            }
+            QSpinBox:focus {
+                border-color: #667eea;
+            }
+        """)
+        options_layout.addWidget(self.batch_size_spin, 2, 1)
         
-        # Add all rows
-        self.input_layout.addWidget(QLabel("Input Image:"))
-        self.input_layout.addLayout(input_image_layout)
+        # Checkboxes
+        self.large_images_check = QCheckBox("Allow Large Images")
+        self.large_images_check.setChecked(True)
+        self.large_images_check.setStyleSheet("""
+            QCheckBox {
+                color: #343a40;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #e9ecef;
+                border-radius: 4px;
+                background: white;
+            }
+            QCheckBox::indicator:checked {
+                background: #667eea;
+                border-color: #667eea;
+            }
+        """)
+        options_layout.addWidget(self.large_images_check, 3, 0, 1, 2)
         
-        self.input_layout.addWidget(QLabel("Image Directory:"))
-        self.input_layout.addLayout(image_dir_layout)
+        left_layout.addWidget(options_group)
         
-        self.input_layout.addWidget(QLabel("Output Directory:"))
-        self.input_layout.addLayout(output_dir_layout)
+        # Debug section
+        debug_group = ModernGroupBox("Debug Tools")
+        debug_layout = QVBoxLayout(debug_group)
         
-        self.input_layout.addLayout(threshold_layout)
-        self.input_layout.addLayout(device_layout)
-        self.input_layout.addLayout(batch_size_layout)
+        # Test verification button
+        self.test_verify_btn = ModernButton("Test Face Verification")
+        self.test_verify_btn.clicked.connect(self.test_face_verification)
+        debug_layout.addWidget(self.test_verify_btn)
         
-        # Update batch size after UI is created
-        self.update_batch_size()
-
-    def create_controls(self):
-        self.start_button = QPushButton("Start Processing")
-        self.start_button.clicked.connect(self.start_processing)
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.setEnabled(False)
-
-        control_layout = QHBoxLayout()
-        control_layout.addWidget(self.start_button)
-        control_layout.addWidget(self.stop_button)
-        self.control_layout = control_layout
-
-    def create_progress(self):
+        left_layout.addWidget(debug_group)
+        
+        # Process button
+        self.process_btn = ModernButton("Start Processing", primary=True)
+        self.process_btn.clicked.connect(self.start_processing)
+        left_layout.addWidget(self.process_btn)
+        
+        # Progress bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setAlignment(Qt.AlignCenter)
-
-        progress_layout = QVBoxLayout()
-        progress_layout.addWidget(QLabel("Indexing Progress:"))
-        progress_layout.addWidget(self.progress_bar)
-        self.progress_layout = progress_layout
-
-    def create_log(self):
-        self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True)
-
-    def browse_input_image(self):
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                text-align: center;
+                font-weight: bold;
+                background: #f8f9fa;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 6px;
+            }
+        """)
+        left_layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.status_label = QLabel("Ready to process")
+        self.status_label.setStyleSheet("color: #6c757d; font-style: italic;")
+        left_layout.addWidget(self.status_label)
+        
+        left_layout.addStretch()
+        
+        # Right panel - Results
+        right_panel = QWidget()
+        right_panel.setStyleSheet("""
+            QWidget {
+                background: white;
+                border-radius: 12px;
+            }
+        """)
+        
+        right_shadow = QGraphicsDropShadowEffect()
+        right_shadow.setBlurRadius(20)
+        right_shadow.setColor(QColor(0, 0, 0, 30))
+        right_shadow.setOffset(0, 2)
+        right_panel.setGraphicsEffect(right_shadow)
+        
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Results title
+        results_title = QLabel("Processing Results")
+        results_title.setStyleSheet("""
+            QLabel {
+                font-size: 24px;
+                font-weight: bold;
+                color: #343a40;
+                margin-bottom: 20px;
+            }
+        """)
+        right_layout.addWidget(results_title)
+        
+        # Results text area
+        self.results_text = QTextEdit()
+        self.results_text.setStyleSheet("""
+            QTextEdit {
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                padding: 16px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 13px;
+                background: #f8f9fa;
+                color: #343a40;
+            }
+        """)
+        right_layout.addWidget(self.results_text)
+        
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([400, 800])
+        
+    def detect_gpu(self):
+        try:
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                gpu_info = f"GPU detected: {len(gpus)} device(s)"
+                for i, gpu in enumerate(gpus):
+                    gpu_info += f"\n  - {gpu.name}"
+            else:
+                gpu_info = "No GPU detected - will use CPU"
+            
+            self.results_text.append(f"🔍 Hardware Detection:\n{gpu_info}\n")
+        except Exception as e:
+            self.results_text.append(f"❌ GPU detection failed: {e}\n")
+    
+    def browse_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Input Image", "", 
-            "Images (*.png *.xpm *.jpg *.jpeg *.bmp *.webp *.tiff)"
+            self, "Select Target Image", "", 
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff)"
         )
         if file_path:
-            self.input_image_line.setText(file_path)
-
-    def browse_image_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Image Directory")
-        if dir_path:
-            self.image_dir_line.setText(dir_path)
-
-    def browse_output_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
-        if dir_path:
-            self.output_dir_line.setText(dir_path)
-
-    def update_threshold_line(self, value):
-        threshold = value / 100.0
-        # FIX: Block signals to prevent recursion
-        self.threshold_line.blockSignals(True)
-        self.threshold_line.setText(f"{threshold:.2f}")
-        self.threshold_line.blockSignals(False)
-
-    def update_threshold_slider(self):
-        try:
-            text = self.threshold_line.text()
-            threshold = float(text)
-            if 0.0 <= threshold <= 1.0:
-                # FIX: Block signals to prevent recursion
-                self.threshold_slider.blockSignals(True)
-                self.threshold_slider.setValue(int(threshold * 100))
-                self.threshold_slider.blockSignals(False)
-        except ValueError:
-            # Reset to previous valid value if conversion fails
-            self.update_threshold_line(self.threshold_slider.value())
-
-    def update_batch_size(self, index=None):
-        device = self.device_combo.currentText().lower()
-        if device == "cuda" and torch.cuda.is_available():
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            free_mem = total_mem - torch.cuda.memory_allocated(0)
-            # Estimate memory per batch item more conservatively
-            max_batch = max(1, int(free_mem // (1000 * 1024**2)))
-            self.batch_size_spin.setRange(1, min(max_batch, 100))
-            self.batch_size_spin.setValue(min(16, max_batch))
-        else:
-            self.batch_size_spin.setRange(1, 16)
-            self.batch_size_spin.setValue(4)
-
-    def start_processing(self):
-        input_path = self.input_image_line.text()
-        image_dir = self.image_dir_line.text()
-        output_dir = self.output_dir_line.text()
+            self.image_path_edit.setText(file_path)
+    
+    def browse_database(self):
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Database Folder")
+        if folder_path:
+            self.db_path_edit.setText(folder_path)
+    
+    def browse_output(self):
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if folder_path:
+            self.output_path_edit.setText(folder_path)
+    
+    def test_face_verification(self):
+        """Test face verification between target image and first database image"""
+        if not self.image_path_edit.text() or not self.db_path_edit.text():
+            QMessageBox.warning(self, "Input Error", 
+                              "Please select both target image and database folder first.")
+            return
         
-        # Validation
-        if not input_path:
-            self.log_output.append("Error: Input image not selected.")
-            return
-        if not image_dir:
-            self.log_output.append("Error: Image directory not selected.")
-            return
-        if not output_dir:
-            self.log_output.append("Error: Output directory not selected.")
-            return
+        try:
+            # Find first image in database
+            db_path = self.db_path_edit.text()
+            image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
             
-        if not os.path.isfile(input_path):
-            self.log_output.append("Error: Input image not found.")
-            return
-        if not os.path.isdir(image_dir):
-            self.log_output.append("Error: Image directory not found.")
-            return
-        if not os.path.isdir(output_dir):
-            try:
-                os.makedirs(output_dir)
-                self.log_output.append(f"Created output directory: {output_dir}")
-            except Exception as e:
-                self.log_output.append(f"Error creating output directory: {str(e)}")
+            test_image = None
+            for root, dirs, files in os.walk(db_path):
+                for file in files:
+                    if file.lower().endswith(image_extensions):
+                        test_image = os.path.join(root, file)
+                        break
+                if test_image:
+                    break
+            
+            if not test_image:
+                QMessageBox.warning(self, "No Images", "No images found in database folder.")
                 return
-
-        # Get parameters
-        threshold = float(self.threshold_line.text())
-        device = self.device_combo.currentText().lower()
-        batch_size = self.batch_size_spin.value()
-
-        # Disable UI elements during processing
-        self.start_button.setEnabled(False)
+            
+            self.results_text.append(f"\n🔬 Testing verification between:")
+            self.results_text.append(f"Target: {os.path.basename(self.image_path_edit.text())}")
+            self.results_text.append(f"Test: {os.path.basename(test_image)}")
+            
+            # Create a temporary processing thread for verification
+            class VerificationThread(QThread):
+                result_ready = Signal(dict)
+                error_occurred = Signal(str)
+                
+                def __init__(self, target_path, test_path):
+                    super().__init__()
+                    self.target_path = target_path
+                    self.test_path = test_path
+                
+                def run(self):
+                    try:
+                        result = DeepFace.verify(
+                            img1_path=self.target_path,
+                            img2_path=self.test_path,
+                            model_name="ArcFace",
+                            distance_metric="cosine",
+                            detector_backend="retinaface",
+                            enforce_detection=False,
+                            align=True
+                        )
+                        self.result_ready.emit(result)
+                    except Exception as e:
+                        self.error_occurred.emit(str(e))
+            
+            def on_verification_result(result):
+                similarity = 1 - result['distance']
+                verified = result['verified']
+                self.results_text.append(f"✅ Verification Result:")
+                self.results_text.append(f"   Similarity: {similarity:.4f}")
+                self.results_text.append(f"   Verified: {verified}")
+                self.results_text.append(f"   Distance: {result['distance']:.4f}")
+                self.results_text.append(f"   Threshold: {result['threshold']:.4f}\n")
+            
+            def on_verification_error(error):
+                self.results_text.append(f"❌ Verification Error: {error}\n")
+            
+            self.verification_thread = VerificationThread(self.image_path_edit.text(), test_image)
+            self.verification_thread.result_ready.connect(on_verification_result)
+            self.verification_thread.error_occurred.connect(on_verification_error)
+            self.verification_thread.start()
+            
+        except Exception as e:
+            self.results_text.append(f"❌ Test Error: {str(e)}\n")
+    
+    def start_processing(self):
+        # Validate inputs
+        if not all([self.image_path_edit.text(), self.db_path_edit.text(), 
+                   self.output_path_edit.text()]):
+            QMessageBox.warning(self, "Input Error", 
+                              "Please fill in all required fields.")
+            return
+        
+        try:
+            threshold = float(self.threshold_edit.text())
+            if not (0 <= threshold <= 1):
+                raise ValueError("Threshold must be between 0 and 1")
+        except ValueError as e:
+            QMessageBox.warning(self, "Input Error", 
+                              f"Invalid threshold value: {e}")
+            return
+        
+        # Prepare processing parameters
+        params = {
+            'image_path': self.image_path_edit.text(),
+            'db_path': self.db_path_edit.text(),
+            'threshold': threshold,
+            'output_folder': self.output_path_edit.text(),
+            'use_gpu': self.gpu_combo.currentText() != "Force CPU",
+            'batch_size': self.batch_size_spin.value(),
+            'allow_large_images': self.large_images_check.isChecked()
+        }
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(params['output_folder'], exist_ok=True)
+        
+        # Start processing thread
+        self.processing_thread = ProcessingThread(params)
+        self.processing_thread.progress_updated.connect(self.update_progress)
+        self.processing_thread.status_updated.connect(self.update_status)
+        self.processing_thread.finished_processing.connect(self.processing_finished)
+        self.processing_thread.error_occurred.connect(self.processing_error)
+        
+        self.process_btn.setEnabled(False)
+        self.process_btn.setText("Processing...")
         self.progress_bar.setValue(0)
-        self.log_output.clear()
-        self.log_output.append("Starting face similarity processing...")
-
-        # Create and start the worker
-        worker = FaceProcessor(input_path, image_dir, output_dir, threshold, device, batch_size)
-        worker.signals.progress.connect(self.update_progress)
-        worker.signals.message.connect(self.log_message)
-        worker.signals.finished.connect(self.process_results)
-        self.threadpool.start(worker)
-
-    def log_message(self, message):
-        self.log_output.append(message)
-        # Scroll to bottom to show latest message
-        scrollbar = self.log_output.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-
+        self.results_text.clear()
+        
+        self.processing_thread.start()
+    
     def update_progress(self, value):
         self.progress_bar.setValue(value)
-
-    def process_results(self, df):
-        self.current_matrix = df
-        
-        if len(df) > 0:
-            self.log_output.append(f"Complete! Found {len(df)} similar faces.")
-            # Display top matches
-            sorted_df = df.sort_values(by=['score'], ascending=False)
-            if len(sorted_df) > 0:
-                self.log_output.append("\nTop matches:")
-                for i, (_, row) in enumerate(sorted_df.iterrows()):
-                    if i < 5:  # Show top 5 matches
-                        file_name = os.path.basename(row['path'])
-                        self.log_output.append(f"  {file_name} - Score: {row['score']:.4f}")
-            
-            # Save to .pkl
-            try:
-                similarity_file = os.path.join(self.output_dir_line.text(), "similarity_matrix.pkl")
-                with open(similarity_file, "wb") as f:
-                    pickle.dump(df, f)
-                self.log_output.append(f"\nSimilarity matrix saved to {similarity_file}")
-            except Exception as e:
-                self.log_output.append(f"Error saving similarity matrix: {str(e)}")
-        else:
-            self.log_output.append("No similar faces found above the threshold.")
-        
+    
+    def update_status(self, message):
+        self.status_label.setText(message)
+        self.results_text.append(f"📝 {message}")
+    
+    def processing_finished(self, results, df):
+        self.results = results
+        self.process_btn.setEnabled(True)
+        self.process_btn.setText("Start Processing")
         self.progress_bar.setValue(100)
-        self.start_button.setEnabled(True)
-        self.log_output.append("\nProcessing complete! Results saved to output directory.")
+        self.status_label.setText("Processing completed!")
+        
+        if results:
+            self.results_text.append(f"\n✅ Processing Complete!\n")
+            self.results_text.append(f"Found {len(results)} similar faces:\n")
+            
+            # Sort results by similarity score (highest first)
+            sorted_results = sorted(results, key=lambda x: x['score'], reverse=True)
+            
+            for i, result in enumerate(sorted_results, 1):
+                self.results_text.append(
+                    f"{i}. {os.path.basename(result['image_path'])} "
+                    f"(Similarity: {result['score']:.4f})"
+                )
+            
+            # Export similarity matrix
+            if not df.empty:
+                matrix_path = os.path.join(
+                    self.output_path_edit.text(), "similarity_matrix.pkl"
+                )
+                with open(matrix_path, "wb") as f:
+                    pickle.dump(df, f)
+                self.results_text.append(f"\n💾 Similarity matrix saved to: {matrix_path}")
+                
+                # Also save as CSV for easier viewing
+                csv_matrix_path = os.path.join(
+                    self.output_path_edit.text(), "similarity_matrix.csv"
+                )
+                df.to_csv(csv_matrix_path, index=False)
+                self.results_text.append(f"💾 Similarity matrix CSV saved to: {csv_matrix_path}")
+            
+            # Show statistics
+            if results:
+                scores = [r['score'] for r in results]
+                self.results_text.append(f"\n📊 Statistics:")
+                self.results_text.append(f"   Highest similarity: {max(scores):.4f}")
+                self.results_text.append(f"   Lowest similarity: {min(scores):.4f}")
+                self.results_text.append(f"   Average similarity: {sum(scores)/len(scores):.4f}")
+                
+        else:
+            self.results_text.append("\n❌ No similar faces found.")
+            self.results_text.append("💡 Try lowering the similarity threshold or check if:")
+            self.results_text.append("   - The target image contains a clear face")
+            self.results_text.append("   - The database folder contains images with faces")
+            self.results_text.append("   - The face detection is working properly")
+    
+    def processing_error(self, error_message):
+        self.process_btn.setEnabled(True)
+        self.process_btn.setText("Start Processing")
+        self.status_label.setText("Error occurred during processing")
+        self.results_text.append(f"\n❌ Error: {error_message}")
+        
+        # Add troubleshooting suggestions
+        self.results_text.append("\n🔧 Troubleshooting suggestions:")
+        self.results_text.append("   - Check if all input paths are valid")
+        self.results_text.append("   - Ensure the target image contains a face")
+        self.results_text.append("   - Verify database folder contains images")
+        self.results_text.append("   - Try using CPU instead of GPU")
+        self.results_text.append("   - Check if you have enough memory available")
+        
+        QMessageBox.critical(self, "Processing Error", error_message)
+
+def main():
+    app = QApplication(sys.argv)
+    
+    # Set application style
+    app.setStyle('Fusion')
+    
+    # Set application properties
+    app.setApplicationName("Face Recognition Studio")
+    app.setApplicationVersion("2.0")
+    app.setOrganizationName("Face Recognition Tools")
+    
+    # Create and show main window
+    window = FaceRecognitionApp()
+    window.show()
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    main()
